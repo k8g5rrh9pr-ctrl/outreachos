@@ -31,17 +31,28 @@ const NICK_PW = 'outreach2024';
 const PALETTE = ['#4f7ef7','#a855f7','#22c55e','#f59e0b','#ec4899','#14b8a6','#f97316','#06b6d4','#8b5cf6','#ef4444','#84cc16','#0ea5e9'];
 const color = name => PALETTE[INTERNS.indexOf(name) % PALETTE.length] || '#4f7ef7';
 
-// ── DB: localStorage persistence ────────────────────────────────
-const LS_KEY = 'outreachos_db_v1';
-function loadDB(){
-  try{
-    const raw=localStorage.getItem(LS_KEY);
-    if(raw){ const p=JSON.parse(raw); if(p&&Array.isArray(p.brands)) return p; }
-  }catch(e){}
-  return {brands:[],conflictsBlocked:0};
+// ── Supabase config ─────────────────────────────────────────────
+const SB_URL = 'https://abqbtykaflwvhvekhbpt.supabase.co';
+const SB_KEY = 'sb_publishable_jvxQoSpymYoloOrt26gOYw_T5Tr3T0r';
+const SB_HEADERS = {'Content-Type':'application/json','apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY};
+
+async function sbFetch(path, opts={}){
+  const r = await fetch(SB_URL+path, {...opts, headers:{...SB_HEADERS,...(opts.headers||{})}});
+  if(!r.ok){ const t=await r.text(); throw new Error(t); }
+  return r.status===204?null:r.json();
 }
-function saveDB(){ try{ localStorage.setItem(LS_KEY,JSON.stringify(window.DB)); }catch(e){} }
-window.DB = loadDB();
+
+// ── DB: Supabase as source of truth, localStorage as cache ───────
+window.DB = { brands:[], conflictsBlocked:0 };
+
+async function loadDB(){
+  try{
+    const rows = await sbFetch('/rest/v1/brands?select=*&order=ts.asc');
+    window.DB.brands = rows.map(r=>({id:r.id, name:r.name, owner:r.owner, ts:r.ts}));
+  }catch(e){ console.warn('DB load failed',e); }
+}
+
+function saveDB(){} // no-op, writes go direct to Supabase
 
 // ── Normalization & formatting ──────────────────────────────────
 function normKey(s){ return (s||'').toLowerCase().replace(/[^a-z0-9]/g,''); }
@@ -94,11 +105,22 @@ function checkBrands(names,intern){
 function addBrand(name,intern){
   const k=normKey(name);
   if(fuzzyBrandMatch(k)) return false;
-  window.DB.brands.push({name:fmt(name),owner:intern,ts:Date.now()});
-  saveDB(); return true;
+  const brand={name:fmt(name),owner:intern,ts:Date.now()};
+  window.DB.brands.push(brand);
+  // async write to Supabase
+  sbFetch('/rest/v1/brands',{method:'POST',headers:{'Prefer':'return=representation'},body:JSON.stringify({name:brand.name,owner:brand.owner,ts:brand.ts})})
+    .then(rows=>{ if(rows&&rows[0]) brand.id=rows[0].id; })
+    .catch(e=>console.warn('addBrand failed',e));
+  return true;
 }
-function removeBrand(b){ window.DB.brands=window.DB.brands.filter(x=>x!==b); saveDB(); }
-function clearIntern(n){ window.DB.brands=window.DB.brands.filter(b=>b.owner!==n); saveDB(); }
+function removeBrand(b){
+  window.DB.brands=window.DB.brands.filter(x=>x!==b);
+  if(b.id) sbFetch('/rest/v1/brands?id=eq.'+b.id,{method:'DELETE'}).catch(e=>console.warn('removeBrand failed',e));
+}
+function clearIntern(n){
+  window.DB.brands=window.DB.brands.filter(b=>b.owner!==n);
+  sbFetch('/rest/v1/brands?owner=eq.'+encodeURIComponent(n),{method:'DELETE'}).catch(e=>console.warn('clearIntern failed',e));
+}
 
 // ── Export / Import ──────────────────────────────────────────────
 function exportDB(){
@@ -690,9 +712,18 @@ function renderNickResults(result,internName,container){
 }
 
 // ================================================================
-//  BOOT
+//  BOOT — load live DB then render
 // ================================================================
-renderNameSelect();
+(async()=>{
+  // Show loading screen
+  const loadEl = div({style:{height:'100vh',display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:'12px',background:'#07090f'}},
+    div({style:{fontSize:'24px'}},'\u2B21'),
+    div({style:{fontSize:'14px',color:'#4a5568'}},'Loading OutreachOS...'),
+  );
+  mount(loadEl);
+  await loadDB();
+  renderNameSelect();
+})();
 </script>
 </body>
 </html>
