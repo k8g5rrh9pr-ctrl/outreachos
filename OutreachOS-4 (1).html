@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>OutreachOS</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body,#app{height:100%;background:#07090f;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#e2e8f0;-webkit-font-smoothing:antialiased}
+::-webkit-scrollbar{width:3px}::-webkit-scrollbar-thumb{background:#1e2d45;border-radius:4px}
+button{cursor:pointer;font-family:inherit;border:none;outline:none;background:none}
+input,textarea,select{font-family:inherit;outline:none;-webkit-appearance:none;appearance:none}
+textarea{resize:none}
+select option{background:#0d1420}
+@keyframes up{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.au{animation:up .2s ease both}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;display:flex;align-items:center;justify-content:center;padding:20px;animation:fadeIn .15s ease}
+.modal-box{background:#0d1420;border:1px solid #1a2638;border-radius:16px;padding:22px 20px;width:100%;max-width:360px;animation:up .18s ease}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+// ===============================================================
+//  OutreachOS v4 — pure vanilla JS, zero dependencies
+// ===============================================================
+
+const INTERNS = ['Jared','Drew','Will','Izzy','Michael','Harrison','Olivia','Julian','Spyro','Serena','Ryan','Leon'];
+const NICK_PW = 'outreach2024';
+const PALETTE = ['#4f7ef7','#a855f7','#22c55e','#f59e0b','#ec4899','#14b8a6','#f97316','#06b6d4','#8b5cf6','#ef4444','#84cc16','#0ea5e9'];
+const color = name => PALETTE[INTERNS.indexOf(name) % PALETTE.length] || '#4f7ef7';
+
+// ── DB: localStorage persistence ────────────────────────────────
+const LS_KEY = 'outreachos_db_v1';
+function loadDB(){
+  try{
+    const raw=localStorage.getItem(LS_KEY);
+    if(raw){ const p=JSON.parse(raw); if(p&&Array.isArray(p.brands)) return p; }
+  }catch(e){}
+  return {brands:[],conflictsBlocked:0};
+}
+function saveDB(){ try{ localStorage.setItem(LS_KEY,JSON.stringify(window.DB)); }catch(e){} }
+window.DB = loadDB();
+
+// ── Normalization & formatting ──────────────────────────────────
+function normKey(s){ return (s||'').toLowerCase().replace(/[^a-z0-9]/g,''); }
+function fmt(raw){
+  raw=raw.trim(); const k=normKey(raw);
+  const sp={liquidiv:'Liquid IV',lmnt:'LMNT',bmw:'BMW',cbd:'CBD',redbull:'Red Bull',cbdoil:'CBD Oil'};
+  return sp[k]||raw.replace(/\b\w/g,c=>c.toUpperCase());
+}
+
+// ── Fuzzy brand match ────────────────────────────────────────────
+function fuzzyBrandMatch(inputKey){
+  const exact=window.DB.brands.find(b=>normKey(b.name)===inputKey);
+  if(exact) return exact;
+  const contains=window.DB.brands.find(b=>{
+    const dk=normKey(b.name);
+    return (inputKey.startsWith(dk)||dk.startsWith(inputKey))&&Math.min(inputKey.length,dk.length)>=3;
+  });
+  if(contains) return contains;
+  const inputWords=inputKey.match(/[a-z0-9]{4,}/g)||[];
+  if(inputWords.length){
+    const ignore=new Set(['snack','snacks','brand','brands','protein','energy','drink','drinks','food','foods','nutrition','health','sport','sports','company','original','premium','shop','store','market','natural','organic']);
+    const wordMatch=window.DB.brands.find(b=>{
+      const dbWords=(normKey(b.name).match(/[a-z0-9]{4,}/g)||[]);
+      const im=inputWords.filter(w=>!ignore.has(w));
+      const dm=dbWords.filter(w=>!ignore.has(w));
+      if(!im.length||!dm.length) return false;
+      return im.some(w=>dm.includes(w));
+    });
+    if(wordMatch) return wordMatch;
+  }
+  return null;
+}
+
+// ── Core brand operations ────────────────────────────────────────
+function checkBrands(names,intern){
+  const result={conflict:[],mine:[],newBrand:[]};
+  const seen=new Set();
+  names.forEach(raw=>{
+    const name=raw.trim(); if(!name) return;
+    const k=normKey(name);
+    if(seen.has(k)) return;
+    seen.add(k);
+    const hit=fuzzyBrandMatch(k);
+    if(!hit)                    result.newBrand.push(fmt(name));
+    else if(hit.owner===intern) result.mine.push(hit.name);
+    else                        result.conflict.push({name:hit.name,owner:hit.owner});
+  });
+  return result;
+}
+function addBrand(name,intern){
+  const k=normKey(name);
+  if(fuzzyBrandMatch(k)) return false;
+  window.DB.brands.push({name:fmt(name),owner:intern,ts:Date.now()});
+  saveDB(); return true;
+}
+function removeBrand(b){ window.DB.brands=window.DB.brands.filter(x=>x!==b); saveDB(); }
+function clearIntern(n){ window.DB.brands=window.DB.brands.filter(b=>b.owner!==n); saveDB(); }
+
+// ── Export / Import ──────────────────────────────────────────────
+function exportDB(){
+  const blob=new Blob([JSON.stringify(window.DB,null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  const d=new Date();
+  a.href=url;
+  a.download='OutreachOS_'+d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')+'.json';
+  a.click(); URL.revokeObjectURL(url);
+}
+function importDB(file,cb){
+  const r=new FileReader();
+  r.onload=e=>{
+    try{
+      const p=JSON.parse(e.target.result);
+      if(!Array.isArray(p.brands)) throw new Error('bad');
+      window.DB=p; saveDB(); cb(null,p.brands.length);
+    }catch(err){ cb('Invalid file — could not import.'); }
+  };
+  r.readAsText(file);
+}
+
+// ── Tiny DOM helpers ─────────────────────────────────────────────
+const h=(tag,attrs={},...children)=>{
+  const el=document.createElement(tag);
+  for(const [k,v] of Object.entries(attrs)){
+    if(k==='style'&&typeof v==='object') Object.assign(el.style,v);
+    else if(k.startsWith('on')) el.addEventListener(k.slice(2).toLowerCase(),v);
+    else el.setAttribute(k,v);
+  }
+  children.flat().forEach(c=>{
+    if(c==null||c===false) return;
+    el.appendChild(typeof c==='string'?document.createTextNode(c):c);
+  });
+  return el;
+};
+const div =(a,...c)=>h('div',a,...c);
+const btn =(a,...c)=>h('button',a,...c);
+const span=(a,...c)=>h('span',a,...c);
+const txt =(a,...c)=>h('textarea',a,...c);
+const inp =a=>h('input',a);
+function mount(el){ document.getElementById('app').replaceChildren(el); }
+
+// ── Style tokens ─────────────────────────────────────────────────
+const S={
+  page:    {height:'100vh',overflowY:'auto',background:'#07090f',padding:'0 0 40px'},
+  card:    {background:'#0d1420',border:'1px solid #1a2638',borderRadius:'14px',padding:'18px 16px'},
+  label:   {fontSize:'11px',fontWeight:'600',color:'#4a5568',letterSpacing:'.06em',textTransform:'uppercase',marginBottom:'6px'},
+  bPrimary:{background:'#1d4ed8',border:'1px solid #3b82f640',color:'#fff',borderRadius:'10px',padding:'12px',fontSize:'14px',fontWeight:'600',width:'100%',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:'8px'},
+  bSuccess:{background:'#14532d',border:'1px solid #22c55e40',color:'#22c55e',borderRadius:'8px',padding:'6px 12px',fontSize:'12px',fontWeight:'600',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:'5px',whiteSpace:'nowrap'},
+  bDanger: {background:'#450a0a',border:'1px solid #ef444430',color:'#ef4444',borderRadius:'8px',padding:'6px 12px',fontSize:'12px',fontWeight:'600',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:'5px',whiteSpace:'nowrap'},
+  bDefault:{background:'#111827',border:'1px solid #1e2d45',color:'#64748b',borderRadius:'8px',padding:'6px 12px',fontSize:'12px',fontWeight:'500',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:'5px',whiteSpace:'nowrap'},
+  input:   {background:'#0a0f1a',border:'1px solid #1a2638',color:'#e2e8f0',borderRadius:'10px',padding:'11px 14px',fontSize:'14px',width:'100%',display:'block'},
+  textarea:{background:'#0a0f1a',border:'1px solid #1a2638',color:'#e2e8f0',borderRadius:'10px',padding:'12px 14px',fontSize:'13px',width:'100%',display:'block',lineHeight:'1.7',fontFamily:'-apple-system,BlinkMacSystemFont,monospace'},
+};
+function focusStyle(el){
+  el.addEventListener('focus',()=>{el.style.borderColor='#4f7ef7';el.style.boxShadow='0 0 0 3px #4f7ef715';});
+  el.addEventListener('blur', ()=>{el.style.borderColor='#1a2638';el.style.boxShadow='none';});
+  return el;
+}
+function hoverStyle(el,hBg,nBg){
+  el.addEventListener('mouseenter',()=>el.style.background=hBg);
+  el.addEventListener('mouseleave',()=>el.style.background=nBg);
+  return el;
+}
+
+// ── Toast ────────────────────────────────────────────────────────
+let toastEl=null;
+function toast(msg,type='ok'){
+  if(toastEl) toastEl.remove();
+  const colors={ok:{bg:'#052e16',border:'#22c55e40',color:'#22c55e'},err:{bg:'#450a0a',border:'#ef444440',color:'#ef4444'},warn:{bg:'#422006',border:'#f59e0b40',color:'#f59e0b'}};
+  const c=colors[type]||colors.ok;
+  toastEl=div({style:{position:'fixed',bottom:'24px',right:'16px',zIndex:'999',background:c.bg,border:'1px solid '+c.border,color:c.color,borderRadius:'10px',padding:'10px 16px',fontSize:'13px',fontWeight:'500',animation:'up .2s ease',maxWidth:'280px',lineHeight:'1.4'}},msg);
+  document.body.appendChild(toastEl);
+  setTimeout(()=>toastEl&&toastEl.remove(),3500);
+}
+
+// ── Confirm Modal ────────────────────────────────────────────────
+function showConfirm({title,body,confirmLabel,confirmStyle,onConfirm}){
+  const overlay=div({class:'modal-overlay'});
+  overlay.addEventListener('click',e=>{if(e.target===overlay) overlay.remove();});
+  const box=div({class:'modal-box'});
+  box.append(
+    div({style:{fontSize:'15px',fontWeight:'700',color:'#f1f5f9',marginBottom:'6px'}},title),
+    div({style:{fontSize:'13px',color:'#64748b',marginBottom:'18px',lineHeight:'1.5'}},body),
+  );
+  const btns=div({style:{display:'flex',gap:'8px'}});
+  const cancelB=btn({style:{...S.bDefault,flex:'1',justifyContent:'center'},onClick(){overlay.remove();}},['Cancel']);
+  const confirmB=btn({style:{...(confirmStyle||S.bDanger),flex:'1',justifyContent:'center'},onClick(){overlay.remove();onConfirm();}},[confirmLabel||'Confirm']);
+  hoverStyle(cancelB,'#1a2230','#111827');
+  btns.append(cancelB,confirmB); box.appendChild(btns); overlay.appendChild(box);
+  document.body.appendChild(overlay);
+}
+
+// ── Time ago ────────────────────────────────────────────────────
+function timeAgo(ts){
+  if(!ts) return '';
+  const m=Math.floor((Date.now()-ts)/60000);
+  if(m<1) return 'just now'; if(m<60) return m+'m ago';
+  const hr=Math.floor(m/60); if(hr<24) return hr+'h ago';
+  return Math.floor(hr/24)+'d ago';
+}
+
+// ================================================================
+//  SCREEN 1: Who are you?
+// ================================================================
+function renderNameSelect(){
+  let chosen='',nickMode=false;
+  const wrap=div({style:{...S.page,display:'flex',alignItems:'center',justifyContent:'center',padding:'20px'}});
+  const inner=div({style:{width:'100%',maxWidth:'400px',animation:'up .22s ease'}});
+
+  inner.appendChild(div({style:{textAlign:'center',marginBottom:'32px'}},
+    div({style:{width:'52px',height:'52px',borderRadius:'14px',background:'#4f7ef715',border:'1px solid #4f7ef730',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'24px',margin:'0 auto 12px'}},'\u2B21'),
+    div({style:{fontSize:'24px',fontWeight:'800',color:'#f1f5f9',letterSpacing:'-.5px'}},'OutreachOS'),
+    div({style:{fontSize:'13px',color:'#4a5568',marginTop:'4px'}},'Brand conflict checker'),
+  ));
+
+  const card=div({style:{...S.card}});
+  card.append(
+    div({style:{fontSize:'16px',fontWeight:'700',color:'#f1f5f9',marginBottom:'4px',textAlign:'center'}},'Who are you?'),
+    div({style:{fontSize:'12px',color:'#4a5568',marginBottom:'18px',textAlign:'center'}},'Select your name to continue'),
+  );
+
+  const brandCount=window.DB.brands.length;
+  if(brandCount>0){
+    card.appendChild(div({style:{background:'#0a1a0d',border:'1px solid #22c55e30',borderRadius:'10px',padding:'10px 14px',marginBottom:'14px',display:'flex',alignItems:'center',gap:'10px'}},
+      span({style:{fontSize:'18px'}},'\uD83D\uDCBE'),
+      div({style:{flex:'1'}},
+        div({style:{fontSize:'12px',fontWeight:'600',color:'#22c55e'}},'Session restored'),
+        div({style:{fontSize:'11px',color:'#4a5568',marginTop:'1px'}},brandCount+' brand'+(brandCount!==1?'s ':' ')+'loaded from last session'),
+      ),
+    ));
+  }
+
+  const grid=div({style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'7px',marginBottom:'14px'}});
+  const allNames=['Nick',...INTERNS]; let activePill=null;
+  allNames.forEach(name=>{
+    const isNick=name==='Nick'; const c=isNick?'#f59e0b':color(name);
+    const pill=btn({style:{padding:'9px 12px',borderRadius:'10px',background:'#0a0f1a',border:'1px solid #1a2638',color:'#64748b',fontSize:'13px',fontWeight:'500',display:'flex',alignItems:'center',gap:'8px',textAlign:'left',width:'100%',transition:'all .12s'},
+      onClick(){
+        if(activePill) Object.assign(activePill.style,{background:'#0a0f1a',borderColor:'#1a2638',color:'#64748b'});
+        chosen=name; activePill=pill;
+        Object.assign(pill.style,{background:c+'18',borderColor:c+'60',color:c});
+        nickMode=isNick; pwRow.style.display=isNick?'block':'none';
+        goBtn.style.background='#1d4ed8'; goBtn.style.color='#fff';
+        goBtn.replaceChildren(span({style:{fontSize:'15px'}},'\u2192'),document.createTextNode(' Enter as '+name));
+        if(isNick) pwInp.focus();
+      }
+    },
+      div({style:{width:'26px',height:'26px',borderRadius:'50%',background:c+'20',border:'1px solid '+c+'40',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'11px',fontWeight:'800',color:c,flexShrink:'0'}},name[0]),
+      span({style:{flex:'1'}},name),
+      isNick?span({style:{fontSize:'10px',color:c+'90'}},'\uD83D\uDEE1'):'',
+    );
+    grid.appendChild(pill);
+  });
+  card.appendChild(grid);
+  const pwRow=div({style:{display:'none',marginBottom:'12px'}});
+  const pwInp=inp({type:'password',placeholder:'Enter password',style:{...S.input,marginBottom:'0'}});
+  focusStyle(pwInp); pwInp.addEventListener('keydown',e=>{if(e.key==='Enter') goBtn.click();});
+  pwRow.append(div({style:{...S.label,marginBottom:'6px'}},'Admin password'),pwInp);
+  card.appendChild(pwRow);
+  const errEl=div({style:{display:'none',background:'#450a0a',border:'1px solid #ef444430',color:'#ef4444',borderRadius:'8px',padding:'8px 12px',fontSize:'12px',marginBottom:'10px'}});
+  card.appendChild(errEl);
+  const goBtn=btn({style:{...S.bPrimary,background:'#111827',color:'#334155',gap:'8px',transition:'all .15s'},
+    onClick(){
+      errEl.style.display='none';
+      if(!chosen){errEl.textContent='Please select your name first.';errEl.style.display='block';return;}
+      if(nickMode){
+        if(pwInp.value!==NICK_PW){errEl.textContent='Incorrect password.';errEl.style.display='block';pwInp.value='';pwInp.focus();return;}
+        renderNickView();
+      }else{ renderInternView(chosen); }
+    }
+  },'Select your name above');
+  card.appendChild(goBtn);
+  inner.append(card,div({style:{textAlign:'center',marginTop:'14px',fontSize:'11px',color:'#1a2638'}},'OutreachOS \u00B7 Shared brand tracker'));
+  wrap.appendChild(inner); mount(wrap);
+}
+
+// ================================================================
+//  SCREEN 2: INTERN VIEW
+// ================================================================
+function renderInternView(internName){
+  const c=color(internName);
+  const page=div({style:{...S.page,overflowY:'auto',height:'100vh'}});
+  const topbar=div({style:{background:'#0a0f1a',borderBottom:'1px solid #1a2638',padding:'12px 16px',display:'flex',alignItems:'center',gap:'10px',position:'sticky',top:'0',zIndex:'10'}});
+  const countEl=div({style:{fontSize:'11px',color:'#334155',marginTop:'1px'}});
+  function updateCount(){ const n=window.DB.brands.filter(b=>b.owner===internName).length; countEl.textContent=n+' brand'+(n!==1?'s ':' ')+'on your tab'; }
+  updateCount();
+  topbar.append(
+    div({style:{width:'32px',height:'32px',borderRadius:'50%',background:c+'20',border:'1.5px solid '+c+'50',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'13px',fontWeight:'800',color:c,flexShrink:'0'}},internName[0]),
+    div({style:{flex:'1'}},div({style:{fontSize:'14px',fontWeight:'700',color:'#f1f5f9'}},internName),countEl),
+    div({style:{fontSize:'10px',background:'#4f7ef710',color:'#4f7ef7',padding:'3px 8px',borderRadius:'7px',fontWeight:'600'}},'\u2B21 OutreachOS'),
+    btn({style:{fontSize:'12px',color:'#4a5568',padding:'5px 10px',border:'1px solid #1a2638',borderRadius:'7px',display:'flex',alignItems:'center',gap:'5px'},onClick:renderNameSelect},['\u21A9 Switch']),
+  );
+  page.appendChild(topbar);
+  const content=div({style:{padding:'16px 14px',display:'flex',flexDirection:'column',gap:'14px',maxWidth:'560px',margin:'0 auto'}});
+  const checkCard=div({style:{...S.card,border:'1px solid #4f7ef725',boxShadow:'0 0 20px #4f7ef705'}});
+  checkCard.append(
+    div({style:{fontSize:'15px',fontWeight:'700',color:'#f1f5f9',marginBottom:'2px',display:'flex',alignItems:'center',gap:'7px'}},span({style:{color:'#4f7ef7',fontSize:'16px'}},'\u2736'),'Check Your Brands'),
+    div({style:{fontSize:'12px',color:'#4a5568',marginBottom:'14px'}},'Paste brands below \u2014 one per line. We\'ll check against every other intern\'s list instantly.'),
+  );
+  const ta=txt({placeholder:'Nike\nYeti\nLMNT\nLiquid IV\nHydrant\nPoppi',style:{...S.textarea,minHeight:'130px',marginBottom:'10px'}});
+  focusStyle(ta);
+  const checkBtn=btn({style:{...S.bPrimary},onClick:runCheck},['\uD83D\uDD0E  Check Brands']);
+  hoverStyle(checkBtn,'#1e40af','#1d4ed8');
+  checkCard.append(ta,checkBtn);
+  content.appendChild(checkCard);
+  const resultsWrap=div({style:{display:'none',flexDirection:'column',gap:'10px'}});
+  content.appendChild(resultsWrap);
+  const tabPreview=div({style:{...S.card,display:'none'}});
+  content.appendChild(tabPreview);
+  page.appendChild(content); mount(page); refreshTabPreview();
+
+  function refreshTabPreview(){
+    const mine=window.DB.brands.filter(b=>b.owner===internName);
+    tabPreview.replaceChildren();
+    if(!mine.length){tabPreview.style.display='none';return;}
+    tabPreview.style.display='block';
+    tabPreview.appendChild(div({style:{fontSize:'12px',fontWeight:'600',color:'#4a5568',marginBottom:'10px',display:'flex',alignItems:'center',gap:'6px'}},span({style:{color:c}},'\u25C9'),'Your Tab  \u00B7  '+mine.length+' brand'+(mine.length!==1?'s ':' ')));
+    const chips=div({style:{display:'flex',flexWrap:'wrap',gap:'6px'}});
+    mine.forEach(b=>chips.appendChild(span({style:{fontSize:'12px',background:'#0a0f1a',border:'1px solid #1a2638',borderRadius:'7px',padding:'4px 10px',color:'#94a3b8'}},b.name)));
+    tabPreview.appendChild(chips); updateCount();
+  }
+
+  function runCheck(){
+    const raw=ta.value.trim();
+    if(!raw){toast('Paste some brand names first \uD83D\uDC46','warn');return;}
+    const names=raw.split('\n').map(s=>s.trim()).filter(Boolean);
+    if(!names.length){toast('No brand names found','warn');return;}
+    renderResults(checkBrands(names,internName));
+  }
+
+  function renderResults(result){
+    resultsWrap.replaceChildren(); resultsWrap.style.display='flex';
+    const total=result.conflict.length+result.mine.length+result.newBrand.length;
+    const addedSet=new Set();
+    const hdr=div({style:{display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:'8px'}},
+      div({style:{fontSize:'13px',fontWeight:'600',color:'#64748b'}},'Results \u00B7 '+total+' brand'+(total!==1?'s ':' ')+'checked'),
+    );
+    const copyBtn=btn({style:{...S.bDefault,fontSize:'11px',padding:'5px 11px'},onClick(){
+      const lines=[];
+      if(result.conflict.length){lines.push('\u274C Already claimed \u2014 remove these:');result.conflict.forEach(b=>lines.push('  \u2022 '+b.name+' \u2192 claimed by '+b.owner));lines.push('');}
+      const goodList=result.newBrand.filter(n=>addedSet.has(n));
+      if(goodList.length){lines.push('\u2705 Added to your tab:');goodList.forEach(n=>lines.push('  \u2022 '+n));lines.push('');}
+      const stillNew=result.newBrand.filter(n=>!addedSet.has(n));
+      if(stillNew.length){lines.push('\uD83C\uDD95 New \u2014 not yet added:');stillNew.forEach(n=>lines.push('  \u2022 '+n));lines.push('');}
+      if(result.mine.length){lines.push('\uD83D\uDCCC Already on your tab:');result.mine.forEach(n=>lines.push('  \u2022 '+n));}
+      navigator.clipboard.writeText(lines.join('\n').trim()).then(()=>{
+        copyBtn.textContent='\u2713 Copied!';copyBtn.style.color='#22c55e';copyBtn.style.borderColor='#22c55e40';
+        setTimeout(()=>{copyBtn.textContent='Copy Summary';copyBtn.style.color='#64748b';copyBtn.style.borderColor='#1e2d45';},2500);
+      });
+    }},['Copy Summary']);
+    hdr.appendChild(copyBtn); resultsWrap.appendChild(hdr);
+
+    if(result.conflict.length){
+      const sec=bSection('\uD83D\uDD34','Already Claimed \u2014 You Cannot Add These',result.conflict.length,'#ef4444','#1a0505','#ef444425');
+      result.conflict.forEach(b=>{
+        const oc=color(b.owner);
+        sec.body.appendChild(bRow({icon:'\u2715',ic:'#ef4444',label:b.name,lc:'#fca5a5',
+          right:div({style:{display:'flex',alignItems:'center',gap:'6px'}},
+            div({style:{width:'18px',height:'18px',borderRadius:'50%',background:oc+'22',border:'1px solid '+oc+'40',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'9px',fontWeight:'800',color:oc}},b.owner[0]),
+            span({style:{fontSize:'12px',color:'#ef4444',fontWeight:'600'}},b.owner),
+          ),bg:'#0d0303',bd:'#7f1d1d30',
+        }));
+      });
+      sec.note('Tell Nick \u2014 these '+result.conflict.length+' brand'+(result.conflict.length!==1?'s are':' is')+' already taken.','#7f1d1d');
+      resultsWrap.appendChild(sec.el);
+    }
+    if(result.mine.length){
+      const sec=bSection('\uD83D\uDCCC','Already on Your Tab',result.mine.length,'#4f7ef7','#0a1530','#4f7ef725');
+      result.mine.forEach(name=>sec.body.appendChild(bRow({icon:'\u25C9',ic:'#4f7ef7',label:name,lc:'#bfdbfe',bg:'#080f25',bd:'#1e3a8a30'})));
+      resultsWrap.appendChild(sec.el);
+    }
+    if(result.newBrand.length){
+      const pending=()=>result.newBrand.filter(n=>!addedSet.has(n)).length;
+      const secTitle=div({style:{display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:'8px',marginBottom:'10px'}});
+      secTitle.appendChild(div({style:{display:'flex',alignItems:'center',gap:'8px'}},
+        span({style:{fontSize:'18px',lineHeight:'1'}},'\uD83C\uDD95'),
+        div({},div({style:{fontSize:'13px',fontWeight:'700',color:'#f1f5f9'}},'New Brands \u2014 Add to Your Tab'),div({style:{fontSize:'11px',color:'#4a5568',marginTop:'1px'}},'These don\'t exist in the database yet. Tap to claim them.')),
+      ));
+      let addAllBtn=null;
+      if(result.newBrand.length>1){
+        addAllBtn=btn({style:{...S.bSuccess,fontSize:'11px',padding:'5px 11px'}});
+        addAllBtn.textContent='+ Add All ('+result.newBrand.length+')';
+        addAllBtn.addEventListener('click',()=>{
+          showConfirm({title:'Add '+pending()+' brands to your tab?',body:'This will claim all unclaimed brands for '+internName+'.',confirmLabel:'Yes, Add All',confirmStyle:S.bSuccess,onConfirm(){
+            let added=0;
+            result.newBrand.forEach(name=>{if(!addedSet.has(name)&&addBrand(name,internName)){addedSet.add(name);added++;}});
+            refreshRows(); refreshTabPreview();
+            if(added) toast('\u2713 '+added+' brand'+(added!==1?'s ':' ')+'added to your tab');
+            if(addAllBtn) addAllBtn.style.display='none';
+          }});
+        });
+        secTitle.appendChild(addAllBtn);
+      }
+      const secWrap=div({style:{...S.card,background:'#0d0f18',border:'1px solid #252c3a',padding:'14px'}});
+      secWrap.appendChild(secTitle);
+      const rowsWrap=div({style:{display:'flex',flexDirection:'column',gap:'5px'}}); secWrap.appendChild(rowsWrap);
+      function refreshRows(){
+        rowsWrap.replaceChildren();
+        result.newBrand.forEach(name=>{
+          const isAdded=addedSet.has(name);
+          const row=div({style:{display:'flex',alignItems:'center',gap:'10px',padding:'9px 12px',background:isAdded?'#03080a':'#080a12',border:'1px solid '+(isAdded?'#16532d40':'#1e2535'),borderRadius:'9px',transition:'all .2s'}});
+          row.append(
+            span({style:{fontSize:'14px',flexShrink:'0',color:isAdded?'#22c55e':'#334155'}},isAdded?'\u2713':'\u25CB'),
+            span({style:{flex:'1',fontSize:'13px',fontWeight:'500',color:isAdded?'#86efac':'#94a3b8'}},name),
+            isAdded
+              ? span({style:{fontSize:'11px',color:'#22c55e',background:'#22c55e15',padding:'3px 10px',borderRadius:'6px',fontWeight:'700'}},'Added \u2713')
+              : btn({style:{...S.bSuccess,padding:'5px 12px',fontSize:'12px'},onClick(){
+                  if(addBrand(name,internName)){addedSet.add(name);refreshRows();refreshTabPreview();toast('\u2713 '+name+' added to your tab');}
+                  else toast(name+' was just claimed by someone else','err');
+                  if(addAllBtn&&pending()===0) addAllBtn.style.display='none';
+                }},['+ Add to My Tab']),
+          );
+          rowsWrap.appendChild(row);
+        });
+      }
+      refreshRows(); resultsWrap.appendChild(secWrap);
+    }
+    if(!result.conflict.length&&!result.newBrand.length&&result.mine.length){
+      resultsWrap.appendChild(div({style:{...S.card,textAlign:'center',padding:'24px',border:'1px solid #16532d40',background:'#051208'}},
+        div({style:{fontSize:'24px',marginBottom:'8px'}},'\u2705'),
+        div({style:{fontSize:'14px',fontWeight:'700',color:'#22c55e',marginBottom:'4px'}},'All clear!'),
+        div({style:{fontSize:'12px',color:'#4a5568'}},'All these brands are already on your tab.'),
+      ));
+    }
+    setTimeout(()=>resultsWrap.scrollIntoView({behavior:'smooth',block:'start'}),80);
+  }
+
+  function bSection(emoji,title,count,c,bg,border){
+    const el=div({style:{...S.card,background:bg,border:'1px solid '+border,padding:'14px'}});
+    el.appendChild(div({style:{display:'flex',alignItems:'center',gap:'8px',marginBottom:'10px'}},
+      span({style:{fontSize:'16px',lineHeight:'1'}},emoji),
+      div({},div({style:{fontSize:'13px',fontWeight:'700',color:'#f1f5f9'}},title),div({style:{fontSize:'11px',color:c,marginTop:'1px'}},count+' brand'+(count!==1?'s ':' '))),
+    ));
+    const body=div({style:{display:'flex',flexDirection:'column',gap:'5px'}}); el.appendChild(body);
+    return {el,body,note(msg,col){el.appendChild(div({style:{marginTop:'10px',fontSize:'12px',color:col,background:'#00000020',borderRadius:'7px',padding:'8px 10px'}},msg));}};
+  }
+  function bRow({icon,ic,label,lc,right,bg,bd}){
+    const row=div({style:{display:'flex',alignItems:'center',gap:'10px',padding:'8px 12px',background:bg||'#080e1c',border:'1px solid '+(bd||'#1a2638'),borderRadius:'9px'}});
+    row.append(span({style:{color:ic||'#334155',fontSize:'13px',flexShrink:'0',fontWeight:'700'}},icon||'\u00B7'),span({style:{flex:'1',fontSize:'13px',fontWeight:'500',color:lc||'#e2e8f0'}},label));
+    if(right) row.appendChild(right); return row;
+  }
+}
+
+// ================================================================
+//  SCREEN 3: NICK VIEW
+// ================================================================
+function renderNickView(){
+  const page=div({style:{...S.page,overflowY:'auto',height:'100vh'}});
+  const topbar=div({style:{background:'#0a0f1a',borderBottom:'1px solid #1a2638',padding:'12px 16px',display:'flex',alignItems:'center',gap:'10px',position:'sticky',top:'0',zIndex:'10'}});
+  topbar.append(
+    div({style:{width:'32px',height:'32px',borderRadius:'50%',background:'#f59e0b20',border:'1.5px solid #f59e0b50',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'13px',fontWeight:'800',color:'#f59e0b'}},'N'),
+    div({style:{flex:'1'}},div({style:{fontSize:'14px',fontWeight:'700',color:'#f1f5f9'}},'Nick'),div({style:{fontSize:'11px',color:'#f59e0b'}},'\uD83D\uDEE1 Admin')),
+    div({style:{fontSize:'10px',background:'#4f7ef710',color:'#4f7ef7',padding:'3px 8px',borderRadius:'7px',fontWeight:'600'}},'\u2B21 OutreachOS'),
+    btn({style:{fontSize:'12px',color:'#4a5568',padding:'5px 10px',border:'1px solid #1a2638',borderRadius:'7px',display:'flex',alignItems:'center',gap:'5px'},onClick:renderNameSelect},['\u21A9 Switch']),
+  );
+  page.appendChild(topbar);
+  const content=div({style:{padding:'16px 14px',display:'flex',flexDirection:'column',gap:'14px',maxWidth:'600px',margin:'0 auto'}});
+  const tabRow=div({style:{display:'flex',gap:'6px',marginBottom:'2px'}});
+  let activeTab='check';
+  const checkPane=div({}); const dbPane=div({style:{display:'none'}});
+  content.append(tabRow,checkPane,dbPane);
+
+  function tabBtn(label,id){
+    const isActive=()=>activeTab===id;
+    const el=btn({style:{padding:'8px 16px',borderRadius:'9px',fontSize:'13px',fontWeight:'600',background:isActive()?'#4f7ef720':'transparent',border:'1px solid '+(isActive()?'#4f7ef740':'#1a2638'),color:isActive()?'#4f7ef7':'#4a5568',cursor:'pointer',transition:'all .12s'},
+      onClick(){activeTab=id;[tCheck,tDB].forEach(t=>t.update());checkPane.style.display=id==='check'?'block':'none';dbPane.style.display=id==='db'?'block':'none';if(id==='db') renderDB();}
+    },[label]);
+    return {el,update(){const a=isActive();el.style.background=a?'#4f7ef720':'transparent';el.style.borderColor=a?'#4f7ef740':'#1a2638';el.style.color=a?'#4f7ef7':'#4a5568';}};
+  }
+  const tCheck=tabBtn('\uD83D\uDD0E  Check Brands','check');
+  const tDB=tabBtn('\uD83D\uDDC2  Full Database','db');
+  tabRow.append(tCheck.el,tDB.el);
+
+  // ── CHECK PANE ──
+  let selectedIntern=INTERNS[0];
+  const internPills=div({style:{display:'flex',gap:'6px',flexWrap:'wrap',marginBottom:'14px'}});
+  function rebuildPills(){
+    internPills.replaceChildren();
+    INTERNS.forEach(name=>{
+      const c=color(name); const count=window.DB.brands.filter(b=>b.owner===name).length;
+      const p=btn({style:{padding:'5px 12px',borderRadius:'20px',fontSize:'12px',fontWeight:'600',background:name===selectedIntern?c+'20':'#0a0f1a',border:'1.5px solid '+(name===selectedIntern?c+'70':'#1a2638'),color:name===selectedIntern?c:'#4a5568',display:'flex',alignItems:'center',gap:'5px',transition:'all .12s'},
+        onClick(){
+          selectedIntern=name; rebuildPills();
+          resultsArea.replaceChildren(); resultsArea.style.display='none';
+          chkBtn2.replaceChildren(document.createTextNode('\uD83D\uDD0E  Check for '+selectedIntern));
+        }
+      },[name,span({style:{fontSize:'9px',background:'#1a2638',color:'#334155',padding:'0 5px',borderRadius:'10px',fontWeight:'700'}},String(count))]);
+      internPills.appendChild(p);
+    });
+  }
+  rebuildPills();
+  const checkCard2=div({style:{...S.card,border:'1px solid #4f7ef725',marginBottom:'0'}});
+  checkCard2.append(div({style:{...S.label}},'Checking brands for'),internPills,div({style:{...S.label}},'Brands to check'));
+  const ta2=txt({placeholder:'Nike\nYeti\nLMNT\nLiquid IV',style:{...S.textarea,minHeight:'110px',marginBottom:'10px'}});
+  focusStyle(ta2);
+  const chkBtn2=btn({style:{...S.bPrimary},onClick:runNickCheck},['\uD83D\uDD0E  Check for '+selectedIntern]);
+  hoverStyle(chkBtn2,'#1e40af','#1d4ed8');
+  checkCard2.append(ta2,chkBtn2); checkPane.appendChild(checkCard2);
+  const resultsArea=div({style:{display:'none',flexDirection:'column',gap:'10px',marginTop:'14px'}});
+  checkPane.appendChild(resultsArea);
+
+  function runNickCheck(){
+    const raw=ta2.value.trim();
+    if(!raw){toast('Paste brand names first','warn');return;}
+    const names=raw.split('\n').map(s=>s.trim()).filter(Boolean);
+    if(!names.length) return;
+    const result=checkBrands(names,selectedIntern);
+    renderNickResults(result,selectedIntern,resultsArea);
+    rebuildPills(); if(activeTab==='db') renderDB();
+  }
+
+  // ── DB PANE ──
+  function renderDB(){
+    dbPane.replaceChildren();
+    // search
+    const searchWrap=div({style:{marginBottom:'12px'}});
+    const searchInp=inp({type:'text',placeholder:'\uD83D\uDD0E  Search brands...',style:{...S.input}});
+    focusStyle(searchInp); searchWrap.appendChild(searchInp); dbPane.appendChild(searchWrap);
+    // stats
+    const stats=div({style:{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',marginBottom:'12px'}});
+    [{l:'Total Brands',v:window.DB.brands.length,c:'#4f7ef7'},{l:'Interns Active',v:new Set(window.DB.brands.map(b=>b.owner)).size,c:'#a855f7'},{l:'Conflicts Blocked',v:window.DB.conflictsBlocked||0,c:'#ef4444'}].forEach(s=>{
+      stats.appendChild(div({style:{background:'#0d1420',border:'1px solid #1a2638',borderRadius:'10px',padding:'10px 12px'}},
+        div({style:{fontSize:'20px',fontWeight:'800',color:s.c}},String(s.v)),
+        div({style:{fontSize:'10px',color:'#4a5568',marginTop:'2px'}},s.l),
+      ));
+    });
+    dbPane.appendChild(stats);
+    // export / import
+    const ioRow=div({style:{display:'flex',gap:'8px',marginBottom:'14px'}});
+    const exportBtn=btn({style:{...S.bDefault,flex:'1',justifyContent:'center'},onClick:exportDB},['\uD83D\uDCE4 Export DB']);
+    hoverStyle(exportBtn,'#1a2230','#111827');
+    const importLabel=h('label',{style:{...S.bDefault,flex:'1',cursor:'pointer',justifyContent:'center',display:'flex',alignItems:'center',gap:'5px'}});
+    importLabel.textContent='\uD83D\uDCE5 Import DB';
+    const fileInp=inp({type:'file',accept:'.json',style:{display:'none'}});
+    fileInp.addEventListener('change',e=>{
+      const file=e.target.files[0]; if(!file) return;
+      showConfirm({title:'Import database?',body:'This will replace the current session data with the imported file. Export first if you want to keep current data.',confirmLabel:'Yes, Import',onConfirm(){
+        importDB(file,(err,count)=>{
+          if(err){toast(err,'err');return;}
+          toast('\u2713 Imported '+count+' brands'); renderDB(); rebuildPills();
+        });
+      }});
+      fileInp.value='';
+    });
+    importLabel.appendChild(fileInp); ioRow.append(exportBtn,importLabel); dbPane.appendChild(ioRow);
+
+    const brandsWrap=div({}); dbPane.appendChild(brandsWrap);
+    function renderBrandsView(q){
+      brandsWrap.replaceChildren(); q=(q||'').toLowerCase().trim();
+      if(window.DB.brands.length===0){
+        brandsWrap.appendChild(div({style:{...S.card,textAlign:'center',padding:'40px',color:'#1e2d45'}},div({style:{fontSize:'32px',marginBottom:'8px'}},'\uD83D\uDCED'),div({style:{fontSize:'13px',color:'#334155'}},'No brands in the database yet'))); return;
+      }
+      let rendered=0;
+      INTERNS.forEach(name=>{
+        let mine=window.DB.brands.filter(b=>b.owner===name);
+        if(q) mine=mine.filter(b=>b.name.toLowerCase().includes(q));
+        if(!mine.length) return; rendered++;
+        const c=color(name);
+        const sec=div({style:{...S.card,marginBottom:'8px'}});
+        // header with clear-tab button
+        sec.appendChild(div({style:{display:'flex',alignItems:'center',gap:'8px',marginBottom:'10px'}},
+          div({style:{width:'28px',height:'28px',borderRadius:'50%',background:c+'20',border:'1.5px solid '+c+'40',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'11px',fontWeight:'800',color:c}},name[0]),
+          div({style:{flex:'1'}},div({style:{fontSize:'13px',fontWeight:'700',color:'#f1f5f9'}},name),div({style:{fontSize:'11px',color:'#4a5568'}},mine.length+' brand'+(mine.length!==1?'s ':' '))),
+          btn({style:{...S.bDanger,fontSize:'11px',padding:'4px 10px'},onClick(){
+            showConfirm({title:'Clear '+name+'\'s entire tab?',body:'This permanently removes all '+mine.length+' brand'+(mine.length!==1?'s ':' ')+'from '+name+'\'s list.',confirmLabel:'Yes, Clear Tab',onConfirm(){
+              clearIntern(name); toast(name+'\'s tab cleared','warn'); renderDB(); rebuildPills();
+            }});
+          }},['\uD83D\uDDD1 Clear Tab']),
+        ));
+        const chips=div({style:{display:'flex',flexWrap:'wrap',gap:'5px'}});
+        mine.forEach(b=>{
+          const chip=span({style:{fontSize:'12px',background:'#0a0f1a',border:'1px solid #1a2638',borderRadius:'7px',padding:'4px 10px',color:'#94a3b8',display:'inline-flex',alignItems:'center',gap:'4px'}},
+            b.name,
+            b.ts?span({style:{fontSize:'10px',color:'#1e2d45',marginLeft:'2px'}},timeAgo(b.ts)):'',
+          );
+          const del=btn({style:{color:'#334155',fontSize:'14px',lineHeight:'1',padding:'0 0 0 4px',transition:'color .1s'},onClick(){removeBrand(b);toast(b.name+' removed','warn');renderDB();rebuildPills();}},['\u00D7']);
+          del.addEventListener('mouseenter',()=>del.style.color='#ef4444');
+          del.addEventListener('mouseleave',()=>del.style.color='#334155');
+          chip.appendChild(del); chips.appendChild(chip);
+        });
+        sec.appendChild(chips); brandsWrap.appendChild(sec);
+      });
+      if(q&&rendered===0){
+        brandsWrap.appendChild(div({style:{...S.card,textAlign:'center',padding:'30px',color:'#334155'}},div({style:{fontSize:'24px',marginBottom:'8px'}},'\uD83D\uDD0E'),div({style:{fontSize:'13px'}},'No brands matching \u201C'+q+'\u201D')));
+      }
+    }
+    renderBrandsView('');
+    searchInp.addEventListener('input',()=>renderBrandsView(searchInp.value));
+  }
+
+  page.appendChild(content); mount(page);
+}
+
+// ── Nick result renderer ─────────────────────────────────────────
+function renderNickResults(result,internName,container){
+  container.replaceChildren(); container.style.display='flex';
+  const total=result.conflict.length+result.mine.length+result.newBrand.length;
+  const c=color(internName); const addedSet=new Set();
+  container.appendChild(div({style:{display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:'8px'}},
+    div({style:{display:'flex',alignItems:'center',gap:'8px'}},
+      div({style:{width:'26px',height:'26px',borderRadius:'50%',background:c+'20',border:'1.5px solid '+c+'40',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'11px',fontWeight:'800',color:c}},internName[0]),
+      div({style:{fontSize:'13px',fontWeight:'600',color:'#64748b'}},'Results for '+internName+' \u00B7 '+total+' brand'+(total!==1?'s ':' ')+'checked'),
+    ),
+    btn({style:{fontSize:'11px',padding:'5px 11px',background:'#111827',border:'1px solid #1e2d45',color:'#64748b',borderRadius:'8px',cursor:'pointer',display:'flex',alignItems:'center',gap:'5px'},
+      onClick(e){
+        const lines=[];
+        if(result.conflict.length){lines.push('\u274C Already claimed:');result.conflict.forEach(b=>lines.push('  \u2022 '+b.name+' \u2192 '+b.owner));lines.push('');}
+        const addedList=result.newBrand.filter(n=>addedSet.has(n));
+        if(addedList.length){lines.push('\u2705 Added to '+internName+'\'s tab:');addedList.forEach(n=>lines.push('  \u2022 '+n));lines.push('');}
+        const stillNew=result.newBrand.filter(n=>!addedSet.has(n));
+        if(stillNew.length){lines.push('\uD83C\uDD95 New \u2014 not yet added:');stillNew.forEach(n=>lines.push('  \u2022 '+n));lines.push('');}
+        if(result.mine.length){lines.push('\uD83D\uDCCC Already on '+internName+'\'s tab:');result.mine.forEach(n=>lines.push('  \u2022 '+n));}
+        navigator.clipboard.writeText(lines.join('\n').trim()).then(()=>{
+          const b=e.currentTarget; b.textContent='\u2713 Copied!'; b.style.color='#22c55e';
+          setTimeout(()=>{b.textContent='Copy';b.style.color='#64748b';},2500);
+        });
+      }
+    },['Copy']),
+  ));
+  if(result.conflict.length){
+    const sec=div({style:{background:'#1a0505',border:'1px solid #ef444420',borderRadius:'12px',padding:'12px 14px'}});
+    sec.appendChild(div({style:{fontSize:'12px',fontWeight:'700',color:'#ef4444',marginBottom:'8px'}},'\uD83D\uDD34 Already Claimed ('+result.conflict.length+')'));
+    result.conflict.forEach(b=>{
+      const oc=color(b.owner);
+      sec.appendChild(div({style:{display:'flex',alignItems:'center',gap:'8px',padding:'7px 10px',background:'#0d0303',border:'1px solid #7f1d1d30',borderRadius:'8px',marginBottom:'4px'}},
+        span({style:{color:'#ef4444',fontSize:'13px'}},'\u2715'),span({style:{flex:'1',fontSize:'13px',fontWeight:'500',color:'#fca5a5'}},b.name),
+        div({style:{display:'flex',alignItems:'center',gap:'5px'}},
+          div({style:{width:'16px',height:'16px',borderRadius:'50%',background:oc+'22',border:'1px solid '+oc+'40',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'8px',fontWeight:'800',color:oc}},b.owner[0]),
+          span({style:{fontSize:'11px',color:'#ef4444',fontWeight:'600'}},b.owner),
+        ),
+      ));
+    });
+    container.appendChild(sec);
+  }
+  if(result.mine.length){
+    const sec=div({style:{background:'#0a1530',border:'1px solid #4f7ef720',borderRadius:'12px',padding:'12px 14px'}});
+    sec.appendChild(div({style:{fontSize:'12px',fontWeight:'700',color:'#4f7ef7',marginBottom:'8px'}},'\uD83D\uDCCC Already on '+internName+'\'s Tab ('+result.mine.length+')'));
+    result.mine.forEach(name=>sec.appendChild(div({style:{display:'flex',alignItems:'center',gap:'8px',padding:'7px 10px',background:'#080f25',border:'1px solid #1e3a8a30',borderRadius:'8px',marginBottom:'4px'}},span({style:{color:'#4f7ef7',fontSize:'13px'}},'\u25C9'),span({style:{flex:'1',fontSize:'13px',fontWeight:'500',color:'#bfdbfe'}},name))));
+    container.appendChild(sec);
+  }
+  if(result.newBrand.length){
+    const sec=div({style:{background:'#0d0f18',border:'1px solid #252c3a',borderRadius:'12px',padding:'12px 14px'}});
+    const secHdr=div({style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'8px',flexWrap:'wrap',gap:'6px'}});
+    secHdr.appendChild(div({style:{fontSize:'12px',fontWeight:'700',color:'#94a3b8'}},'\uD83C\uDD95 New Brands ('+result.newBrand.length+')'));
+    let addAllBtn2=null;
+    if(result.newBrand.length>1){
+      addAllBtn2=btn({style:{background:'#14532d',border:'1px solid #22c55e40',color:'#22c55e',borderRadius:'8px',padding:'5px 11px',fontSize:'11px',fontWeight:'600',cursor:'pointer',display:'flex',alignItems:'center',gap:'5px'}});
+      addAllBtn2.textContent='+ Add All ('+result.newBrand.filter(n=>!addedSet.has(n)).length+')';
+      addAllBtn2.addEventListener('click',()=>{
+        showConfirm({title:'Add '+result.newBrand.filter(n=>!addedSet.has(n)).length+' brands to '+internName+'\'s tab?',body:'This will claim all unclaimed brands shown here for '+internName+'.',confirmLabel:'Yes, Add All',confirmStyle:S.bSuccess,onConfirm(){
+          let ct=0;
+          result.newBrand.forEach(name=>{if(!addedSet.has(name)&&addBrand(name,internName)){addedSet.add(name);ct++;}});
+          refreshNewRows();
+          if(ct) toast('\u2713 '+ct+' brand'+(ct!==1?'s ':' ')+'added to '+internName+'\'s tab');
+          if(addAllBtn2) addAllBtn2.style.display='none';
+        }});
+      });
+      secHdr.appendChild(addAllBtn2);
+    }
+    sec.appendChild(secHdr);
+    const rowsW=div({style:{display:'flex',flexDirection:'column',gap:'5px'}}); sec.appendChild(rowsW);
+    function refreshNewRows(){
+      rowsW.replaceChildren();
+      result.newBrand.forEach(name=>{
+        const isAdded=addedSet.has(name);
+        const row=div({style:{display:'flex',alignItems:'center',gap:'8px',padding:'8px 12px',background:isAdded?'#03080a':'#080a12',border:'1px solid '+(isAdded?'#16532d40':'#1e2535'),borderRadius:'9px',transition:'all .2s'}});
+        row.append(
+          span({style:{color:isAdded?'#22c55e':'#334155',fontSize:'13px',flexShrink:'0'}},isAdded?'\u2713':'\u25CB'),
+          span({style:{flex:'1',fontSize:'13px',fontWeight:'500',color:isAdded?'#86efac':'#94a3b8'}},name),
+          isAdded
+            ? span({style:{fontSize:'11px',color:'#22c55e',background:'#22c55e15',padding:'3px 10px',borderRadius:'6px',fontWeight:'700'}},'Added \u2713')
+            : btn({style:{background:'#14532d',border:'1px solid #22c55e40',color:'#22c55e',borderRadius:'8px',padding:'5px 12px',fontSize:'12px',fontWeight:'600',cursor:'pointer',display:'flex',alignItems:'center',gap:'5px'},
+                onClick(){
+                  if(addBrand(name,internName)){addedSet.add(name);refreshNewRows();toast('\u2713 '+name+' added to '+internName+'\'s tab');}
+                  else toast(name+' was just claimed','err');
+                  if(addAllBtn2&&result.newBrand.every(n=>addedSet.has(n))) addAllBtn2.style.display='none';
+                }
+              },['+ Add to '+internName]),
+        );
+        rowsW.appendChild(row);
+      });
+    }
+    refreshNewRows(); container.appendChild(sec);
+  }
+  setTimeout(()=>container.scrollIntoView({behavior:'smooth',block:'start'}),80);
+}
+
+// ================================================================
+//  BOOT
+// ================================================================
+renderNameSelect();
+</script>
+</body>
+</html>
